@@ -23,6 +23,11 @@ LOG_FILE = Path("logs/influx.log")
 LOG_MAX_BYTES = 10 * 1024 * 1024
 LOG_BACKUP_COUNT = 5
 
+# Crawling
+CRAWL_MAX_CONCURRENCY = 10  # in-flight requests per crawl
+CRAWL_RESPECT_ROBOTS_TXT = True
+MAX_DOCUMENT_BYTES = 50 * 1024 * 1024  # larger attachments are skipped
+
 # Storage batching: a flush happens when either threshold is hit or the interval elapses.
 STORAGE_BATCH_ROWS = 200
 STORAGE_BATCH_BYTES = 32 * 1024 * 1024
