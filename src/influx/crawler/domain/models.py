@@ -1,8 +1,9 @@
+import hashlib
 from datetime import datetime, timezone
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Column, DateTime, LargeBinary, String, Text, TypeDecorator, UniqueConstraint
+from sqlalchemy import Column, DateTime, LargeBinary, String, Text, TypeDecorator, UniqueConstraint, event
 from sqlalchemy import Enum as SAEnum
 from sqlmodel import Field, Relationship, SQLModel
 
@@ -41,6 +42,10 @@ class UtcDateTime(TypeDecorator):
         return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
+def sha256(data: bytes) -> bytes:
+    return hashlib.sha256(data).digest()
+
+
 class CrawlStatus(str, Enum):
     PENDING = "PENDING"
     ONGOING = "ONGOING"
@@ -53,6 +58,7 @@ class Document(SQLModel, table=True):
 
     id: int | None = Field(default=None, primary_key=True)
     url: str = Field(sa_column=Column(String(URL_LENGTH), nullable=False))
+    hash: bytes | None = Field(default=None, sa_column=Column(LargeBinary(32)))
     blob: bytes = Field(sa_column=Column(LargeBinary, nullable=False))
     last_seen_at: datetime = Field(
         default_factory=_utcnow,
@@ -69,6 +75,7 @@ class Page(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     url: str = Field(sa_column=Column(String(URL_LENGTH), nullable=False))
     content: str = Field(sa_column=Column(Text, nullable=False))
+    hash: bytes | None = Field(default=None, sa_column=Column(LargeBinary(32)))
     last_seen_at: datetime = Field(
         default_factory=_utcnow,
         sa_column=Column(UtcDateTime, nullable=False),
@@ -114,3 +121,20 @@ class Crawl(SQLModel, table=True):
 
     organization_id: int = Field(foreign_key="organization.id", nullable=False)
     organization: "Organization" = Relationship(back_populates="crawls")
+
+
+# SQLModel bypasses instrumented attribute assignment in __init__, so an
+# @validates hook would miss every freshly constructed row. Hashing at flush
+# time keeps the digest correct however the instance was built. Bulk upserts
+# skip ORM events entirely, so the crawler storage computes the same digest
+# itself via sha256().
+@event.listens_for(Document, "before_insert")
+@event.listens_for(Document, "before_update")
+def _hash_document(mapper, connection, target: Document) -> None:
+    target.hash = sha256(target.blob)
+
+
+@event.listens_for(Page, "before_insert")
+@event.listens_for(Page, "before_update")
+def _hash_page(mapper, connection, target: Page) -> None:
+    target.hash = sha256(target.content.encode("utf-8"))
