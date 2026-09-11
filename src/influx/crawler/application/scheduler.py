@@ -12,7 +12,8 @@ from datetime import datetime, timezone
 from influx.core.config import CRAWL_WORKERS
 from influx.core.db import async_session
 from influx.core.logging import get_logger
-from influx.crawler.application.crawler import run_crawl
+from influx.crawler.application.crawler import CrawlInterrupted, run_crawl
+from influx.crawler.application.service import UrlRules
 from influx.crawler.domain.models import Crawl, CrawlStatus
 
 log = get_logger(__name__)
@@ -22,6 +23,9 @@ class CrawlScheduler:
     def __init__(self, workers: int = CRAWL_WORKERS) -> None:
         self._workers = workers
         self._queue: asyncio.Queue[int] = asyncio.Queue()
+        # Exclusion rules are not persisted with the Crawl row: they live here
+        # until the worker picks the crawl up.
+        self._rules: dict[int, UrlRules] = {}
         self._tasks: list[asyncio.Task[None]] = []
 
     async def start(self) -> None:
@@ -40,14 +44,18 @@ class CrawlScheduler:
         self._tasks = []
         log.info("crawl scheduler stopped")
 
-    async def submit(self, organization_id: int, root_url: str, *, automated: bool = True) -> int:
-        """Queue a crawl and return its Crawl id."""
+    async def submit(
+        self, organization_id: int, root_url: str, *, automated: bool = True, rules: UrlRules | None = None
+    ) -> int:
+        """Queue a crawl and return its Crawl id. `rules` excludes URLs from this crawl only."""
         async with async_session() as session:
             crawl = Crawl(organization_id=organization_id, root_url=root_url, automated=automated)
             session.add(crawl)
             await session.commit()
             crawl_id = crawl.id
         assert crawl_id is not None
+        if rules is not None:
+            self._rules[crawl_id] = rules
         await self._queue.put(crawl_id)
         log.info("crawl %d queued: %s (organization %s)", crawl_id, root_url, organization_id)
         return crawl_id
@@ -77,9 +85,14 @@ class CrawlScheduler:
             crawl.started_at = datetime.now(timezone.utc)
             await session.commit()
 
+        interrupted = False
         try:
-            await run_crawl(crawl.organization_id, crawl.root_url)
+            await run_crawl(crawl.organization_id, crawl.root_url, self._rules.pop(crawl_id, None))
             status = CrawlStatus.SUCCEEDED
+        except CrawlInterrupted:
+            log.warning("crawl %d interrupted by user: %s", crawl_id, crawl.root_url)
+            status = CrawlStatus.FAILED
+            interrupted = True
         except Exception:
             log.error("crawl %d failed: %s", crawl_id, crawl.root_url)
             status = CrawlStatus.FAILED
@@ -90,3 +103,19 @@ class CrawlScheduler:
                 crawl.status = status
                 crawl.finished_at = datetime.now(timezone.utc)
                 await session.commit()
+
+        if interrupted:
+            self._abandon_queue()
+
+    def _abandon_queue(self) -> None:
+        """Ctrl+C means stop everything: crawls still queued are left PENDING in
+        the database and dropped from the queue so `stop()` can return. Crawls
+        already running on other workers finish on their own."""
+        while True:
+            try:
+                crawl_id = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            self._rules.pop(crawl_id, None)
+            log.warning("crawl %d not started: left PENDING after interruption", crawl_id)
+            self._queue.task_done()
