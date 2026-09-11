@@ -22,3 +22,8 @@ DATABASE_URL = (
 LOG_FILE = Path("logs/influx.log")
 LOG_MAX_BYTES = 10 * 1024 * 1024
 LOG_BACKUP_COUNT = 5
+
+# Storage batching: a flush happens when either threshold is hit or the interval elapses.
+STORAGE_BATCH_ROWS = 200
+STORAGE_BATCH_BYTES = 32 * 1024 * 1024
+STORAGE_FLUSH_INTERVAL = 5.0  # seconds
