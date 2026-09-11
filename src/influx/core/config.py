@@ -24,6 +24,7 @@ LOG_MAX_BYTES = 10 * 1024 * 1024
 LOG_BACKUP_COUNT = 5
 
 # Crawling
+CRAWL_WORKERS = 2  # crawls running at the same time
 CRAWL_MAX_CONCURRENCY = 10  # in-flight requests per crawl
 CRAWL_RESPECT_ROBOTS_TXT = True
 MAX_DOCUMENT_BYTES = 50 * 1024 * 1024  # larger attachments are skipped
