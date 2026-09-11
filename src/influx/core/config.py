@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+ALLOWED_EXTENSIONS = frozenset({"pdf", "docx", "txt", "doc", "odt"})
 # Database: defaults match .env.example and docker-compose.yml.
 DB_USER = getenv("DB_USER", "influx")
 DB_PASSWORD = getenv("DB_PASSWORD", "influx")
