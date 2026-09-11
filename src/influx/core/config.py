@@ -1,4 +1,5 @@
 from os import getenv
+from pathlib import Path
 from urllib.parse import quote_plus
 
 from dotenv import load_dotenv
@@ -15,3 +16,8 @@ DATABASE_URL = (
     f"postgresql+asyncpg://{quote_plus(DB_USER)}:{quote_plus(DB_PASSWORD)}"
     f"@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 )
+
+# Logging: console shows one line per event, the rotating file keeps stacktraces.
+LOG_FILE = Path("logs/influx.log")
+LOG_MAX_BYTES = 10 * 1024 * 1024
+LOG_BACKUP_COUNT = 5
