@@ -56,29 +56,31 @@ uv sync
 uv run influx init-db
 ```
 
-`init-db` crea tutte le tabelle (idempotente: può essere rilanciato senza
-problemi).
+`init-db` crea tutte le tabelle e, se non esistono già, un utente di esempio
+(`mario.rossi@example.com`) con un'organizzazione `Esempio` di cui è
+amministratore. È idempotente: può essere rilanciato senza problemi. Al termine
+stampa l'`id` dell'organizzazione, che serve al passo successivo.
 
 ### 3. Utente e organizzazione
 
 Ogni crawl è legato a un'organizzazione, che a sua volta ha un utente
-amministratore. Al momento non esiste un comando CLI per crearli, quindi si
-inseriscono direttamente in SQL:
+amministratore. `init-db` ne crea già una di esempio; per aggiungerne altre, al
+momento non esiste un comando CLI, quindi si inseriscono direttamente in SQL:
 
 ```sh
 docker compose exec postgres psql -U influx -d influx <<'SQL'
 INSERT INTO "user" (name, last_name, email, hashed_password)
-VALUES ('Mario', 'Rossi', 'mario.rossi@example.com', 'placeholder');
+VALUES ('Anna', 'Bianchi', 'anna.bianchi@example.com', 'placeholder');
 
 INSERT INTO organization (name, administrator_id)
-VALUES ('Esempio', currval('user_id_seq'));
+VALUES ('Altra', currval('user_id_seq'));
 
 SELECT id, name FROM organization;
 SQL
 ```
 
 Se hai cambiato `DB_USER` o `DB_NAME` nel `.env`, adegua le opzioni `-U` e
-`-d`. Annota l'`id` restituito: serve al passo successivo.
+`-d`.
 
 ### 4. Crawl
 
@@ -94,11 +96,43 @@ Il crawl resta all'interno del dominio dell'organizzazione (sottodomini
 compresi), rispetta `robots.txt` e scarica solo i documenti sullo stesso host
 della pagina che li linka.
 
+Gli URL dello stesso sito vengono canonicalizzati prima di entrare in coda
+(schema e host del root, `?utm_*`/`fbclid` rimossi, parametri ordinati), così
+`http://esempio.it/x` e `https://www.esempio.it/x?fbclid=…` sono la stessa
+pagina. Viene richiesto come pagina solo un path senza estensione o con
+un'estensione da pagina (`PAGE_EXTENSIONS` in `config.py`); immagini, feed,
+archivi e simili non vengono mai richiesti.
+
+#### Escludere URL
+
+Alcuni siti hanno "trappole" per i crawler: liste con pager combinatori,
+calendari infiniti, filtri a faccette. Si escludono con regex applicate a
+path + query dell'URL (mai all'host), da riga di comando o da file:
+
+```sh
+uv run influx crawl --organization-id 1 https://www.esempio.it \
+  --exclude '^/ateneo/bandi[?]' \
+  --exclude-file rules/esempio.txt
+```
+
+Il file ha una regex per riga; righe vuote e commenti `#` sono ignorati:
+
+```
+# pager multiplo di Drupal: /ateneo/bandi?page=,0,3,120 esplode in migliaia di URL
+^/ateneo/bandi[?]
+# feed per tassonomia
+/feed$
+```
+
+Le regex non sono ancorate automaticamente: `^/ateneo/bandi[?]` esclude la
+lista paginata ma lascia passare `/ateneo/bandi` e `/ateneo/bandi/2025`.
+
 ## Comandi disponibili
 
 ```
 uv run influx init-db                                   # crea le tabelle
 uv run influx crawl --organization-id <ID> <URL> [URL…] # avvia uno o più crawl
+    [--exclude REGEX]…  [--exclude-file PATH]              #   escludendo URL per path+query
 ```
 
 ## Log
