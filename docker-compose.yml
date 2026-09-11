@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:latest
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-influx}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-influx}
+      POSTGRES_DB: ${DB_NAME:-influx}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-influx} -d ${DB_NAME:-influx}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres_data:
