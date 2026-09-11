@@ -1,0 +1,25 @@
+[project]
+name = "influx"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Alessandro C.", email = "info@alessandrocalista.it" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "asyncpg>=0.31.0",
+    "crawlee[parsel]>=1.10.0",
+    "fastapi[standard]>=0.141.1",
+    "sqlalchemy[asyncio]>=2.0.52",
+    "sqlmodel>=0.0.42",
+    "tldextract>=5.3.2",
+]
+
+[project.scripts]
+influx = "influx:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
