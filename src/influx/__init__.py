@@ -29,6 +29,13 @@ def main() -> None:
         help="text file with one exclusion regex per line ('#' starts a comment)",
     )
     crawl.add_argument("urls", nargs="+")
+    embed = commands.add_parser("embed", help="chunk and embed the crawled pages of an organization")
+    embed.add_argument("--organization-id", type=int, required=True)
+    embed.add_argument(
+        "--force",
+        action="store_true",
+        help="re-embed every page, not only those changed since the last run",
+    )
     args = parser.parse_args()
 
     from influx.core.logging import setup_logging
@@ -49,18 +56,12 @@ async def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -
     if args.command == "init-db":
         organization = await _seed_example(EXAMPLE_USER_EMAIL, EXAMPLE_ORGANIZATION_NAME)
         print(f"organization '{organization.name}' has id {organization.id}")
-    elif args.command == "crawl":
-        from influx.core.db import async_session
+        return
+
+    await _require_organization(parser, args.organization_id)
+    if args.command == "crawl":
         from influx.crawler.application.scheduler import CrawlScheduler
         from influx.crawler.application.service import UrlRules
-        from influx.organization.domain.models import Organization
-
-        async with async_session() as session:
-            if await session.get(Organization, args.organization_id) is None:
-                parser.error(
-                    f"organization {args.organization_id} does not exist "
-                    "(see README, 'Utente e organizzazione')"
-                )
 
         rules = UrlRules(args.exclude)
         if args.exclude_file:
@@ -71,6 +72,23 @@ async def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -
         for url in args.urls:
             await scheduler.submit(args.organization_id, url, automated=False, rules=rules)
         await scheduler.stop()
+    elif args.command == "embed":
+        from influx.ingestion.application.page_service import embed_pages
+
+        stats = await embed_pages(args.organization_id, force=args.force)
+        print(
+            f"{stats.embedded} pages embedded ({stats.chunks} chunks), "
+            f"{stats.skipped} unchanged, {stats.empty} without text"
+        )
+
+
+async def _require_organization(parser: argparse.ArgumentParser, organization_id: int) -> None:
+    from influx.core.db import async_session
+    from influx.organization.domain.models import Organization
+
+    async with async_session() as session:
+        if await session.get(Organization, organization_id) is None:
+            parser.error(f"organization {organization_id} does not exist (see README, 'Utente e organizzazione')")
 
 
 async def _seed_example(email: str, organization_name: str) -> "Organization":
