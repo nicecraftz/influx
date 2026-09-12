@@ -1,13 +1,18 @@
 # Influx
 
 Crawler asincrono che, per ogni organizzazione, esplora il sito web indicato,
-salva le pagine e i documenti trovati (PDF, DOCX, TXT, DOC, ODT) e li spezza in
-chunk di testo pronti per l'ingestione.
+salva le pagine e i documenti trovati (PDF, DOCX, TXT, DOC, ODT), spezza il
+testo in chunk e ne calcola gli embedding con un modello locale via Ollama.
+
+Ogni fase è un comando indipendente (`crawl`, `embed`) che legge e scrive sul
+database: si possono lanciare in momenti diversi e rilanciare senza rifare il
+lavoro già fatto.
 
 ## Requisiti
 
 - [uv](https://docs.astral.sh/uv/) (gestisce Python 3.13 e le dipendenze)
 - [Docker](https://docs.docker.com/get-docker/) con Docker Compose (per il database PostgreSQL)
+- [Ollama](https://ollama.com/download) (per gli embedding, solo per il comando `embed`)
 
 ## Configurazione
 
@@ -25,14 +30,27 @@ cp .env.example .env
 | `DB_PORT`     | `5432`      | Porta esposta sulla macchina   |
 | `DB_NAME`     | `influx`    | Nome del database              |
 
+| Variabile                | Default                  | Descrizione                                   |
+| ------------------------ | ------------------------ | --------------------------------------------- |
+| `OLLAMA_HOST`            | `http://localhost:11434` | Endpoint di Ollama                            |
+| `OLLAMA_EMBEDDING_MODEL` | `nomic-embed-text-v2-moe` | Modello per gli embedding                    |
+| `EMBEDDING_DIMENSIONS`   | `768`                    | Dimensione dei vettori richiesta al modello   |
+
+`EMBEDDING_DIMENSIONS` è sia la dimensione chiesta a Ollama sia la larghezza
+della colonna `vector` dei chunk: cambiandola (o cambiando modello) va
+ricreata la tabella (`docker compose down -v` e di nuovo `init-db`).
+`nomic-embed-text-v2-moe` supporta qualsiasi valore tra 256 e 768 (Matryoshka):
+256 riduce di tre volte spazio e tempo di ricerca a fronte di una perdita di
+qualità contenuta.
+
 Lo stesso `.env` è letto sia dall'applicazione (che costruisce la stringa di
 connessione `postgresql+asyncpg://…`) sia da `docker-compose.yml`, quindi
 l'istanza PostgreSQL avviata con Docker corrisponde sempre a ciò che l'app
 si aspetta.
 
 Le altre impostazioni (numero di worker, concorrenza, limiti di dimensione,
-batching dello storage, logging) sono costanti in
-[`src/influx/core/config.py`](src/influx/core/config.py).
+batching dello storage, dimensione e sovrapposizione dei chunk, logging) sono
+costanti in [`src/influx/core/config.py`](src/influx/core/config.py).
 
 ## Avvio
 
@@ -42,8 +60,11 @@ batching dello storage, logging) sono costanti in
 docker compose up -d --wait
 ```
 
-Il comando attende che PostgreSQL sia pronto ad accettare connessioni. I dati
-sono persistiti nel volume `postgres_data`; per ripartire da zero:
+Il comando attende che PostgreSQL sia pronto ad accettare connessioni.
+L'immagine è `pgvector/pgvector`, cioè PostgreSQL con l'estensione `vector`
+usata per gli embedding. I dati sono persistiti nel volume `postgres_data`;
+per ripartire da zero (necessario anche se il volume era stato creato con la
+vecchia immagine `postgres:latest`):
 
 ```sh
 docker compose down -v
@@ -56,9 +77,9 @@ uv sync
 uv run influx init-db
 ```
 
-`init-db` crea tutte le tabelle e, se non esistono già, un utente di esempio
-(`mario.rossi@example.com`) con un'organizzazione `Esempio` di cui è
-amministratore. È idempotente: può essere rilanciato senza problemi. Al termine
+`init-db` abilita l'estensione `vector`, crea tutte le tabelle e, se non
+esistono già, un utente di esempio (`mario.rossi@example.com`) con
+un'organizzazione `Esempio` di cui è amministratore. È idempotente: può essere rilanciato senza problemi. Al termine
 stampa l'`id` dell'organizzazione, che serve al passo successivo.
 
 ### 3. Utente e organizzazione
@@ -127,12 +148,52 @@ Il file ha una regex per riga; righe vuote e commenti `#` sono ignorati:
 Le regex non sono ancorate automaticamente: `^/ateneo/bandi[?]` esclude la
 lista paginata ma lascia passare `/ateneo/bandi` e `/ateneo/bandi/2025`.
 
+### 5. Embedding
+
+Serve Ollama in esecuzione con il modello scaricato:
+
+```sh
+ollama pull nomic-embed-text-v2-moe
+uv run influx embed --organization-id 1
+```
+
+Il comando prende le pagine dell'organizzazione (i documenti non sono ancora
+gestiti), spezza il testo di ognuna in finestre di `MAX_WORDS_PER_CHUNK`
+parole con `CHUNK_OVERLAP_WORDS` parole di sovrapposizione, chiede a Ollama i
+vettori a lotti di `EMBEDDING_BATCH_SIZE` chunk e salva il risultato nella
+tabella `contentchunk` (una riga per chunk: testo, posizione, embedding).
+
+I valori di default sono tarati su `nomic-embed-text-v2-moe`, che legge al
+massimo 512 token: in italiano il suo tokenizer produce circa 1,7 token per
+parola, quindi 250 parole per chunk lasciano margine per testi ricchi di URL,
+codici e nomi propri. Il modello vuole inoltre un prefisso diverso per
+documenti (`search_document: `) e domande (`search_query: `); il servizio lo
+aggiunge da solo prima di chiamare Ollama e non lo salva nel chunk. Un chunk
+che supera comunque il contesto viene troncato con un avviso nel log, mai in
+silenzio. Se cambi modello, rivedi `MAX_WORDS_PER_CHUNK` e i prefissi in
+`config.py`.
+
+È incrementale: ogni chunk memorizza l'hash del contenuto della pagina da cui
+è stato generato, quindi al lancio successivo vengono rielaborate solo le
+pagine il cui contenuto è cambiato dopo un nuovo crawl; le altre vengono
+saltate. Ogni pagina è salvata in una transazione a sé, quindi un'interruzione
+con Ctrl+C perde al massimo la pagina in corso. Per rigenerare tutto (ad
+esempio dopo aver cambiato i parametri di chunking):
+
+```sh
+uv run influx embed --organization-id 1 --force
+```
+
+Al termine stampa un riepilogo: pagine elaborate, chunk prodotti, pagine
+saltate perché invariate e pagine senza testo.
+
 ## Comandi disponibili
 
 ```
 uv run influx init-db                                   # crea le tabelle
 uv run influx crawl --organization-id <ID> <URL> [URL…] # avvia uno o più crawl
     [--exclude REGEX]…  [--exclude-file PATH]              #   escludendo URL per path+query
+uv run influx embed --organization-id <ID> [--force]     # chunk + embedding delle pagine crawlate
 ```
 
 ## Log
@@ -148,7 +209,7 @@ src/influx/
 ├── __init__.py            # entrypoint CLI
 ├── core/                  # config, connessione al DB, logging
 ├── crawler/               # crawl, scheduler, storage batch, modelli Page/Document/Link
-├── ingestion/             # estrazione testo e chunking
+├── ingestion/             # chunking, embedding via Ollama, modello ContentChunk
 ├── organization/          # Organization, Participation
 └── user/                  # User
 ```
