@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -19,6 +20,9 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 
 async def init_db() -> None:
     async with engine.begin() as connection:
+        if connection.dialect.name == "postgresql":
+            # ContentChunk.embedding needs pgvector; the Docker image ships it.
+            await connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await connection.run_sync(SQLModel.metadata.create_all)
 
 
