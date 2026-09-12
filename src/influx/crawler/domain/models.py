@@ -8,6 +8,7 @@ from sqlalchemy import Enum as SAEnum
 from sqlmodel import Field, Relationship, SQLModel
 
 if TYPE_CHECKING:
+    from influx.ingestion.domain.models import ContentChunk
     from influx.organization.domain.models import Organization
 
 # Long enough for any realistic URL, short enough to index on every backend.
@@ -83,6 +84,10 @@ class Page(SQLModel, table=True):
 
     organization_id: int = Field(foreign_key="organization.id", nullable=False)
     organization: "Organization" = Relationship(back_populates="pages")
+    chunks: list["ContentChunk"] = Relationship(
+        back_populates="page",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan", "passive_deletes": True},
+    )
 
 
 class Link(SQLModel, table=True):
