@@ -9,7 +9,6 @@ if TYPE_CHECKING:
 EXAMPLE_USER_EMAIL = "mario.rossi@example.com"
 EXAMPLE_ORGANIZATION_NAME = "Esempio"
 
-
 def main() -> None:
     parser = argparse.ArgumentParser(prog="influx")
     commands = parser.add_subparsers(dest="command", required=True)
