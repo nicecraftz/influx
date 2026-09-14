@@ -16,5 +16,55 @@ services:
       timeout: 3s
       retries: 10
 
+  # `docker compose --profile api up` adds the API and an Ollama instance next
+  # to Postgres. Without the profile only Postgres starts, for running the CLI
+  # from the host as the README describes.
+  ollama:
+    image: ollama/ollama:latest
+    profiles: [api]
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    profiles: [api]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Overrides for the compose network: the same .env serves the host CLI.
+      INFLUX_ENV: production
+      DB_HOST: postgres
+      DB_PORT: 5432
+      OLLAMA_HOST: http://ollama:11434
+      JWT_SECRET_PATH: /run/secrets/jwt_secret
+    secrets:
+      - jwt_secret
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+secrets:
+  jwt_secret:
+    file: ${JWT_SECRET_PATH:-./private_key.pem}
+
 volumes:
   postgres_data:
+  ollama_data:

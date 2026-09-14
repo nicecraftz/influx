@@ -1,0 +1,13 @@
+.git
+.venv
+.env
+.vscode
+.ruff_cache
+__pycache__
+*.py[oc]
+logs
+rules
+*.pem
+*.key
+*.md
+!README.md
