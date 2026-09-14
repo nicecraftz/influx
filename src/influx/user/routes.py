@@ -20,7 +20,6 @@ async def get_user(id: int, session: SessionDep):
 async def delete_user(id: int, session: SessionDep):
     pass
 
-
 @users.patch("/{id}")
 async def update_user(id: int, session: SessionDep):
     pass
