@@ -4,7 +4,7 @@ Crawler asincrono che, per ogni organizzazione, esplora il sito web indicato,
 salva le pagine e i documenti trovati (PDF, DOCX, TXT, DOC, ODT), spezza il
 testo in chunk e ne calcola gli embedding con un modello locale via Ollama.
 
-Ogni fase è un comando indipendente (`crawl`, `embed`) che legge e scrive sul
+Ogni fase è un comando indipendente (`crawl`, `convert`, `embed`) che legge e scrive sul
 database: si possono lanciare in momenti diversi e rilanciare senza rifare il
 lavoro già fatto.
 
@@ -37,7 +37,7 @@ cp .env.example .env
 | `OLLAMA_EMBEDDING_MODEL` | `nomic-embed-text-v2-moe` | Modello per gli embedding                    |
 | `EMBEDDING_DIMENSIONS`   | `768`                    | Dimensione dei vettori richiesta al modello   |
 | `CHUNK_OVERLAP_WORDS`    | `50`                     | Parole condivise da due chunk consecutivi     |
-| `OLLAMA_ENRICHMENT_MODEL`| `qwen3:8b`               | Modello generativo (letto, non ancora usato)  |
+| `OLLAMA_ANSWER_MODEL`    | `qwen3:8b`               | Modello generativo per le risposte            |
 
 | Variabile         | Default           | Descrizione                                              |
 | ----------------- | ----------------- | -------------------------------------------------------- |
@@ -90,9 +90,10 @@ uv run influx init-db
 `init-db` abilita l'estensione `vector`, crea tutte le tabelle e, se non
 esistono già, un utente di esempio (`mario.rossi@example.com`, password
 `placeholder`) con un'organizzazione `Esempio` di cui è amministratore
-(`Participation` con ruolo `ADMIN`). È idempotente: può essere rilanciato senza
-problemi. Al termine stampa l'`id` dell'organizzazione, che serve al passo
-successivo.
+(`Participation` con ruolo `SUPER_ADMIN`) e il cui sito
+(`https://example.com`) è il primo `Link` abilitato. È idempotente: può essere
+rilanciato senza problemi. Al termine stampa l'`id` dell'organizzazione, che
+serve al passo successivo.
 
 Lo stesso comando installa la row-level security (`src/influx/core/rls.py`):
 crea il ruolo `influx_api` (senza login), abilita RLS su ogni tabella e
@@ -109,7 +110,10 @@ tutto. Aggiungere una tabella richiede una voce in `POLICIES`, altrimenti
 Ogni crawl è legato a un'organizzazione, identificata dal suo dominio
 registrabile (`domain`, es. `esempio.it`). Chi la amministra è deciso solo da
 `participation.role` (`SUPER_ADMIN`, `ADMIN`, `VIEWER`): un'organizzazione
-nasce sempre insieme alla partecipazione del suo primo `SUPER_ADMIN`.
+nasce sempre insieme alla partecipazione del suo primo `SUPER_ADMIN` e a un
+`Link` abilitato per il suo sito, da cui partono i crawl richiesti via API
+(vedi "Crawl dall'API"). I sottodomini scoperti durante un crawl diventano
+altri `Link`, disabilitati finché un amministratore non li attiva.
 `init-db` ne crea già una di esempio (`mario.rossi@example.com` /
 `placeholder`); per aggiungerne altre, al momento non esiste un comando CLI,
 quindi si inseriscono direttamente in SQL. L'email va in minuscolo e la
@@ -126,6 +130,9 @@ VALUES ('Altra', 'altra.it');
 INSERT INTO participation (organization_id, user_id, role)
 VALUES (currval('organization_id_seq'), currval('user_id_seq'), 'SUPER_ADMIN');
 
+INSERT INTO link (organization_id, url, enabled)
+VALUES (currval('organization_id_seq'), 'https://altra.it', true);
+
 SELECT id, name FROM organization;
 SQL
 ```
@@ -141,7 +148,8 @@ uv run influx crawl --organization-id 1 https://esempio.it
 
 Si possono passare più URL: ognuno diventa un crawl separato, eseguito dal
 pool di worker in-process. Il comando termina quando tutti i crawl in coda
-sono conclusi.
+sono conclusi. La CLI è lo strumento dell'operatore: crawla gli URL indicati
+senza passare dai `Link` né dal limite giornaliero dell'API.
 
 Il crawl resta all'interno del dominio dell'organizzazione (sottodomini
 compresi), rispetta `robots.txt` e scarica solo i documenti sullo stesso host
@@ -178,7 +186,43 @@ Il file ha una regex per riga; righe vuote e commenti `#` sono ignorati:
 Le regex non sono ancorate automaticamente: `^/ateneo/bandi[?]` esclude la
 lista paginata ma lascia passare `/ateneo/bandi` e `/ateneo/bandi/2025`.
 
-### 5. Embedding
+### 5. Conversione dei documenti
+
+```sh
+uv run influx convert --organization-id 1
+```
+
+Il comando prende i documenti dell'organizzazione (i blob salvati dal crawl)
+e ne estrae il testo in Markdown con [MarkItDown](https://github.com/microsoft/markitdown)
+(PDF via pdfminer/pdfplumber, DOCX, TXT), salvandolo nella colonna `text`
+della tabella `document`, accanto al blob. I formati che MarkItDown non
+gestisce (`.doc`, `.odt`) e i file corrotti vengono segnati come falliti con
+il motivo in `conversion_error`.
+
+La conversione è CPU-bound e in puro Python, quindi gira in un pool di
+`CONVERT_WORKERS` processi (i core della macchina meno uno). Come riferimento,
+un PDF di 1000 pagine si converte in circa 35 s su un portatile: 4000 PDF da
+8 MB sono nell'ordine delle ore, non dei minuti. Un documento che supera
+`CONVERT_TIMEOUT` secondi viene segnato come fallito e il pool passa al
+successivo.
+
+Un PDF scansionato (solo immagini, senza livello di testo) si converte in un
+attimo ma produce zero caratteri: il riepilogo finale li conta come "without
+text" e il log segnala l'URL. Per quelli serve OCR, che oggi non è previsto.
+
+È incrementale come `embed`: ogni documento memorizza l'hash del blob da cui
+è stato estratto il testo, quindi al lancio successivo vengono riconvertiti
+solo i documenti nuovi o cambiati dopo un nuovo crawl. Un documento fallito
+non viene ritentato finché non si passa `--force`, che riconverte tutto:
+
+```sh
+uv run influx convert --organization-id 1 --force
+```
+
+Ogni documento è salvato in una transazione a sé: un'interruzione con Ctrl+C
+perde al massimo i documenti in corso nei worker.
+
+### 6. Embedding
 
 Serve Ollama in esecuzione con il modello scaricato:
 
@@ -223,6 +267,7 @@ saltate perché invariate e pagine senza testo.
 uv run influx init-db                                   # crea le tabelle
 uv run influx crawl --organization-id <ID> <URL> [URL…] # avvia uno o più crawl
     [--exclude REGEX]…  [--exclude-file PATH]              #   escludendo URL per path+query
+uv run influx convert --organization-id <ID> [--force]   # estrae il testo dei documenti crawlati
 uv run influx embed --organization-id <ID> [--force]     # chunk + embedding delle pagine crawlate
 ```
 
@@ -256,13 +301,86 @@ docker compose --profile api run --rm app influx crawl --organization-id 1 https
   di ogni controllo in `checks`) finché uno dei due non risponde. È quello
   usato dall'`healthcheck` di compose.
 
+### Crawl dall'API
+
+L'API esegue i crawl nello stesso processo (uno scheduler avviato con l'app,
+`crawler/application/scheduler.py`) secondo la regola in
+`crawler/application/policy.py`: un crawl di un'organizzazione è un `Crawl`
+per ogni suo `Link` abilitato, e un'organizzazione viene crawlata al massimo
+una volta ogni `CRAWL_INTERVAL` (24 ore), chiunque lo chieda.
+
+- `POST /api/v1/crawler/organizations/{id}` — un `ADMIN` o `SUPER_ADMIN`
+  dell'organizzazione richiede il crawl: 202 con la lista dei `Crawl`
+  accodati. Se l'organizzazione è già stata crawlata nelle ultime 24 ore
+  risponde 429 con `Retry-After` e `next_allowed_at`; 409 se non ha `Link`
+  abilitati o è inattiva.
+- `GET /api/v1/crawler/organizations/{id}` — i crawl dell'organizzazione,
+  dal più recente (`limit`/`offset`), per ogni membro.
+- `GET /api/v1/crawler/{crawl_id}` — un crawl con stato, contatori ed
+  eventuale errore; 404 se non appartiene alle organizzazioni del chiamante.
+
+Ogni `CRAWL_SWEEP_INTERVAL` (10 minuti) l'API accoda un crawl automatico
+(`automated = true`) per le organizzazioni attive con almeno un `Link`
+abilitato che non hanno crawl negli ultimi `CRAWL_INTERVAL`: una richiesta
+manuale sposta quindi in avanti di 24 ore il prossimo crawl automatico. Conta
+la creazione del `Crawl`, non il suo esito: un crawl fallito non riapre la
+finestra (resta la CLI).
+
+All'avvio l'API riprende i crawl rimasti `PENDING` da un processo precedente
+e chiude come `FAILED` quelli che erano `ONGOING` quando è terminato. Lo
+scheduler vive nel processo dell'API: va eseguita con un solo worker uvicorn
+(com'è nel `Dockerfile`), altrimenti ogni worker accoderebbe gli stessi crawl.
+
+### Domande e risposte
+
+Il chatbot è a domanda singola, senza memoria della conversazione: ogni
+richiesta viene risolta da sola.
+
+- `POST /api/v1/retrieval/organizations/{id}` — un membro dell'organizzazione
+  manda `{"question": "..."}` (da 3 a `QUESTION_MAX_LENGTH` caratteri) e
+  riceve la risposta:
+
+  ```json
+  {
+    "id": 12,
+    "question": "Quando posso immatricolarmi?",
+    "answer": "Le immatricolazioni sono aperte dal 15 luglio al 30 settembre [1].",
+    "sources": [
+      {"index": 1, "url": "https://…/immatricolazioni", "title": "Immatricolazioni", "similarity": 0.71, "excerpt": "…"}
+    ],
+    "latency_ms": 4310
+  }
+  ```
+
+  La domanda viene trasformata in vettore con lo stesso modello dei chunk
+  (`retrieval/application/search_service.py`), i `RETRIEVAL_TOP_K` chunk più
+  vicini dell'organizzazione (distanza coseno sull'indice HNSW, filtrata per
+  tenant) vengono passati numerati a `OLLAMA_ANSWER_MODEL` con l'istruzione di
+  rispondere nella lingua della domanda, solo in base ai passaggi, citandoli
+  come `[n]`, e di dire chiaramente quando non contengono la risposta
+  (`retrieval/application/answer_service.py`). `sources[n-1]` è il passaggio
+  citato come `[n]`; `similarity` è la similarità coseno con la domanda.
+
+  Risponde 409 se l'organizzazione è inattiva o non ha ancora chunk
+  (`embed` mai eseguito), 503 se Ollama non risponde o non ha il modello
+  (`ollama pull qwen3:8b`).
+- `GET /api/v1/retrieval/organizations/{id}/metrics` — per ogni membro:
+  domande totali e nelle ultime 24 ore, latenza media, similarità media del
+  miglior passaggio e data dell'ultima domanda. Ogni risposta viene registrata
+  nella tabella `question` (testo, risposta, similarità, latenza, chi ha
+  chiesto).
+
+Oggi rispondono solo le pagine: i documenti convertiti con `convert` non
+sono ancora spezzati in chunk.
+
 ### Arresto
 
-Un `SIGTERM` (quello di `docker stop`) al comando `crawl` ferma i crawl in
-corso in modo pulito: le richieste già in volo terminano, non ne partono di
-nuove, quanto raccolto viene scritto sul database e i crawl ancora in coda
-restano `PENDING`. Il processo esce con codice 143. Con molte richieste in
-volo può servire più dei 10 s di default di Docker: alzare `stop_grace_period`.
+Un `SIGTERM` (quello di `docker stop`) al comando `crawl` o all'API ferma i
+crawl in corso in modo pulito: le richieste già in volo terminano, non ne
+partono di nuove, quanto raccolto viene scritto sul database e i crawl ancora
+in coda restano `PENDING` (l'API li riprende al riavvio). La CLI esce con
+codice 143. Con molte richieste in volo può servire più dei 10 s di default
+di Docker: alzare `stop_grace_period`.
 
 ## Log
 
@@ -279,8 +397,9 @@ src/influx/
 ├── main.py                # app FastAPI
 ├── auth/                  # login, JWT, dipendenze get_current_user / require_membership
 ├── core/                  # config, connessione al DB, RLS, logging, health check
-├── crawler/               # crawl, scheduler, storage batch, modelli Page/Document/Link
-├── ingestion/             # chunking, embedding via Ollama, modello ContentChunk
+├── crawler/               # crawl, scheduler, policy giornaliera, storage batch, modelli Page/Document/Link
+├── ingestion/             # conversione documenti (MarkItDown), chunking, embedding via Ollama, modello ContentChunk
+├── retrieval/             # domanda -> chunk più vicini -> risposta generata da Ollama, modello Question
 ├── organization/          # Organization, Participation
 └── user/                  # User
 ```
