@@ -106,20 +106,25 @@ tutto. Aggiungere una tabella richiede una voce in `POLICIES`, altrimenti
 
 ### 3. Utente e organizzazione
 
-Ogni crawl è legato a un'organizzazione, che a sua volta ha un utente
-amministratore. `init-db` ne crea già una di esempio; per aggiungerne altre, al
-momento non esiste un comando CLI, quindi si inseriscono direttamente in SQL:
+Ogni crawl è legato a un'organizzazione, identificata dal suo dominio
+registrabile (`domain`, es. `esempio.it`). Chi la amministra è deciso solo da
+`participation.role` (`SUPER_ADMIN`, `ADMIN`, `VIEWER`): un'organizzazione
+nasce sempre insieme alla partecipazione del suo primo `SUPER_ADMIN`.
+`init-db` ne crea già una di esempio (`mario.rossi@example.com` /
+`placeholder`); per aggiungerne altre, al momento non esiste un comando CLI,
+quindi si inseriscono direttamente in SQL. L'email va in minuscolo e la
+password è un hash bcrypt (`uv run python -c "from influx.auth.application.password import encrypt_password; print(encrypt_password('...').decode())"`):
 
 ```sh
 docker compose exec postgres psql -U influx -d influx <<'SQL'
 INSERT INTO "user" (name, last_name, email, hashed_password)
-VALUES ('Anna', 'Bianchi', 'anna.bianchi@example.com', 'placeholder');
+VALUES ('Anna', 'Bianchi', 'anna.bianchi@example.com', '$2b$12$...');
 
-INSERT INTO organization (name, administrator_id)
-VALUES ('Altra', currval('user_id_seq'));
+INSERT INTO organization (name, domain)
+VALUES ('Altra', 'altra.it');
 
 INSERT INTO participation (organization_id, user_id, role)
-VALUES (currval('organization_id_seq'), currval('user_id_seq'), 'ADMIN');
+VALUES (currval('organization_id_seq'), currval('user_id_seq'), 'SUPER_ADMIN');
 
 SELECT id, name FROM organization;
 SQL

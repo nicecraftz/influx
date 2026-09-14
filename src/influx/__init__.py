@@ -9,6 +9,7 @@ if TYPE_CHECKING:
 EXAMPLE_USER_EMAIL = "mario.rossi@example.com"
 EXAMPLE_USER_PASSWORD = "placeholder"
 EXAMPLE_ORGANIZATION_NAME = "Esempio"
+EXAMPLE_ORGANIZATION_DOMAIN = "example.com"
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="influx")
@@ -120,11 +121,11 @@ async def _seed_example(email: str, organization_name: str) -> "Organization":
             session.add(user)
             await session.flush()
 
-        organization = Organization(name=organization_name, administrator_id=user.id)
+        organization = Organization(name=organization_name, domain=EXAMPLE_ORGANIZATION_DOMAIN)
         session.add(organization)
         await session.flush()
-        # Membership is what the API checks (require_membership, RLS policies);
-        # administrator_id alone would leave the admin locked out of its own org.
-        session.add(Participation(organization_id=organization.id, user_id=user.id, role=Role.ADMIN))
+        # Membership is the only notion of "admin": an organization is always
+        # created together with its first SUPER_ADMIN participation.
+        session.add(Participation(organization_id=organization.id, user_id=user.id, role=Role.SUPER_ADMIN))
         await session.commit()
         return organization

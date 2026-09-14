@@ -80,11 +80,7 @@ POLICIES: dict[str, tuple[str, str | None]] = {
     "link": (_MEMBER, _ADMIN),
     "page": (_MEMBER, _ADMIN),
     "document": (_MEMBER, _ADMIN),
-    # Chunks carry no organization_id (see AUDIT 4.6); go through the page.
-    "contentchunk": (
-        "page_id IN (SELECT id FROM page WHERE " + _MEMBER + ")",
-        "page_id IN (SELECT id FROM page WHERE " + _ADMIN + ")",
-    ),
+    "contentchunk": (_MEMBER, _ADMIN),
     # A user sees itself and whoever shares an organization with it; it can
     # only change itself. Registration (INSERT) is not an API concern yet.
     "user": (
@@ -113,7 +109,7 @@ _SETUP = (
     CREATE OR REPLACE FUNCTION influx_admin_organizations() RETURNS SETOF integer
     LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
         SELECT organization_id FROM participation
-        WHERE user_id = influx_current_user_id() AND role = 'ADMIN'
+        WHERE user_id = influx_current_user_id() AND role IN ('ADMIN', 'SUPER_ADMIN')
     $$
     """,
     f"""

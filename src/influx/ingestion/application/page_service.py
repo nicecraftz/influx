@@ -59,6 +59,7 @@ async def embed_pages(
             session.add_all(
                 ContentChunk(
                     page_id=page_id,
+                    organization_id=page.organization_id,
                     position=position,
                     content=content,
                     embedding=vector,
