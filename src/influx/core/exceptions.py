@@ -125,7 +125,11 @@ async def _http_exception_handler(request: Request, exc: HTTPException) -> JSONR
 
 
 async def _validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
-    return ValidationProblem(errors=exc.errors()).to_response(request)
+    # pydantic's error dicts also carry `input` (the offending value, e.g. a
+    # password) and `ctx` (which may hold exception objects): keep only what
+    # the client needs to fix the request.
+    errors = [{"loc": e["loc"], "msg": e["msg"], "type": e["type"]} for e in exc.errors()]
+    return ValidationProblem(errors=errors).to_response(request)
 
 
 def register_problem_handlers(app: FastAPI) -> None:

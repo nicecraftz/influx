@@ -1,19 +1,19 @@
 from fastapi import APIRouter
-from fastapi.responses import JSONResponse
 
 from influx.auth.application.service import login, reset_password
 from influx.auth.dependencies import PrivateKeyDep
+from influx.auth.schemas import LoginRequest, TokenResponse
 from influx.core.db import SystemSessionDep
 
 auth = APIRouter(prefix="/auth", tags=["authentication"])
 
 
-@auth.post("/login")
-async def _login(email: str, password: str, session: SystemSessionDep, private_key: PrivateKeyDep):
-    token = await login(email, password, session, private_key)
-    response = JSONResponse(content=token, status_code=200)
-    response.set_cookie(key="Authentication", value="Bearer " + token)
-    return response
+# Bearer token in the response body only (RFC 6750 §4): no cookie, so there is
+# no CSRF surface and the client decides where to keep it.
+@auth.post("/login", response_model=TokenResponse)
+async def _login(body: LoginRequest, session: SystemSessionDep, private_key: PrivateKeyDep) -> TokenResponse:
+    token = await login(body.email, body.password, session, private_key)
+    return TokenResponse(access_token=token)
 
 
 @auth.post("/reset-password")

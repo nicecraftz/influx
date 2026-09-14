@@ -5,9 +5,10 @@ from influx.core.exceptions import ProblemDetailsException
 
 class InvalidCredentialsException(ProblemDetailsException):
     status = HTTPStatus.UNAUTHORIZED
-    type = "/login"
-    title = "Invalid Credentials"
-    detail = "You have inserted the wrong credentials, maybe your password is wrong?"
+    type = "tag:influx,2026:invalid-credentials"
+    title = "Invalid credentials"
+    detail = "Wrong email or password"
+    headers = {"WWW-Authenticate": "Bearer"}
 
 
 class NotAuthenticated(ProblemDetailsException):
