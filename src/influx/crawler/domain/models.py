@@ -14,7 +14,6 @@ if TYPE_CHECKING:
 # Long enough for any realistic URL, short enough to index on every backend.
 URL_LENGTH = 2048
 
-
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -66,8 +65,8 @@ class Document(SQLModel, table=True):
         sa_column=Column(UtcDateTime, nullable=False),
     )
 
-    organization_id: int = Field(foreign_key="organization.id", nullable=False)
-    organization: "Organization" = Relationship(back_populates="documents")
+    organization_id: int = Field(foreign_key="organization.id", nullable=False, ondelete="CASCADE")
+    organization: "Organization" = Relationship(back_populates="documents", passive_deletes="all")
 
 
 class Page(SQLModel, table=True):
@@ -82,7 +81,7 @@ class Page(SQLModel, table=True):
         sa_column=Column(UtcDateTime, nullable=False),
     )
 
-    organization_id: int = Field(foreign_key="organization.id", nullable=False)
+    organization_id: int = Field(foreign_key="organization.id", nullable=False, ondelete="CASCADE")
     organization: "Organization" = Relationship(back_populates="pages")
     chunks: list["ContentChunk"] = Relationship(
         back_populates="page",
@@ -103,7 +102,7 @@ class Link(SQLModel, table=True):
     url: str = Field(sa_column=Column(String(URL_LENGTH), nullable=False))
     enabled: bool = Field(default=False, nullable=False)
 
-    organization_id: int = Field(foreign_key="organization.id", nullable=False)
+    organization_id: int = Field(foreign_key="organization.id", nullable=False, ondelete="CASCADE")
     organization: "Organization" = Relationship(back_populates="links")
 
 
@@ -124,9 +123,15 @@ class Crawl(SQLModel, table=True):
         sa_column=Column(UtcDateTime),
     )
 
-    organization_id: int = Field(foreign_key="organization.id", nullable=False)
+    organization_id: int = Field(foreign_key="organization.id", nullable=False, ondelete="CASCADE")
     organization: "Organization" = Relationship(back_populates="crawls")
 
+
+class CrawlRule(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    regex: str = Field(nullable=False)
+    organization_id: int = Field(nullable=False, foreign_key="organization.id", ondelete="CASCADE")
+    
 
 # SQLModel bypasses instrumented attribute assignment in __init__, so an
 # @validates hook would miss every freshly constructed row. Hashing at flush
