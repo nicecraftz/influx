@@ -9,18 +9,20 @@ hit, on a timer, and once more on exit.
 
 import asyncio
 from collections.abc import Callable
-from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import Table
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from influx.core.config import STORAGE_BATCH_BYTES, STORAGE_BATCH_ROWS, STORAGE_FLUSH_INTERVAL
 from influx.core.db import async_session
 from influx.core.logging import get_logger
-from influx.crawler.domain.models import Document, Link, Page, sha256
+from influx.core.time import utcnow
+from influx.crawler.application.service import UrlRules
+from influx.crawler.domain.models import CrawlRule, Document, Link, Page, sha256
 
 log = get_logger(__name__)
 
@@ -28,6 +30,15 @@ _INSERT_BY_DIALECT: dict[str, Callable[[Table], Any]] = {
     "postgresql": postgresql.insert,
     "sqlite": sqlite.insert,
 }
+
+
+async def load_crawl_rules(
+    organization_id: int, *, session_factory: async_sessionmaker[AsyncSession] = async_session
+) -> UrlRules:
+    """The organization's CrawlRule rows as a UrlRules (empty when it has none)."""
+    async with session_factory() as session:
+        patterns = (await session.exec(select(CrawlRule.regex).where(CrawlRule.organization_id == organization_id))).all()
+    return UrlRules(patterns)
 
 
 class CrawlStorage:
@@ -87,25 +98,28 @@ class CrawlStorage:
 
     # -- producers ---------------------------------------------------------
 
-    async def add_page(self, url: str, content: str) -> None:
+    async def add_page(self, url: str, content: str, title: str | None = None) -> None:
         encoded = content.encode("utf-8")
         self._pages[url] = {
             "organization_id": self._organization_id,
             "url": url,
+            "title": title,
             "content": content,
             "hash": sha256(encoded),
-            "last_seen_at": _utcnow(),
+            "last_seen_at": utcnow(),
         }
         self._pending_bytes += len(encoded)
         await self._flush_if_full()
 
-    async def add_document(self, url: str, blob: bytes) -> None:
+    async def add_document(self, url: str, blob: bytes, content_type: str | None = None) -> None:
         self._documents[url] = {
             "organization_id": self._organization_id,
             "url": url,
+            "content_type": content_type,
+            "size": len(blob),
             "blob": blob,
             "hash": sha256(blob),
-            "last_seen_at": _utcnow(),
+            "last_seen_at": utcnow(),
         }
         self._pending_bytes += len(blob)
         await self._flush_if_full()
@@ -133,9 +147,9 @@ class CrawlStorage:
                 async with self._session_factory() as session:
                     insert = _INSERT_BY_DIALECT[session.get_bind().dialect.name]
                     if pages:
-                        await self._upsert(session, insert, Page.__table__, list(pages.values()), ("content", "hash", "last_seen_at"))
+                        await self._upsert(session, insert, Page.__table__, list(pages.values()), ("title", "content", "hash", "last_seen_at"))
                     if documents:
-                        await self._upsert(session, insert, Document.__table__, list(documents.values()), ("blob", "hash", "last_seen_at"))
+                        await self._upsert(session, insert, Document.__table__, list(documents.values()), ("content_type", "size", "blob", "hash", "last_seen_at"))
                     if links:
                         stmt = insert(Link.__table__).values(list(links.values()))
                         await session.execute(stmt.on_conflict_do_nothing(index_elements=["organization_id", "url"]))
@@ -172,6 +186,3 @@ class CrawlStorage:
         )
         await session.execute(stmt)
 
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)

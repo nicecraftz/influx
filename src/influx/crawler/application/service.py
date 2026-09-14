@@ -171,6 +171,12 @@ def absolute_links(selector: Selector, base_url: str) -> set[str]:
     return links
 
 
+def extract_title(selector: Selector) -> str | None:
+    """`<title>` collapsed to one line, or None when absent or empty."""
+    title = _WHITESPACE.sub(" ", " ".join(selector.css("head title ::text").getall())).strip()
+    return title[:512] or None
+
+
 def extract_text(selector: Selector) -> str:
     """Visible text of the page: `<main>` when present, otherwise the body minus chrome."""
     nodes = selector.css("main ::text").getall()

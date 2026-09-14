@@ -28,9 +28,10 @@ from influx.crawler.application.service import (
     UrlRules,
     absolute_links,
     extract_text,
+    extract_title,
     link_origin,
 )
-from influx.crawler.application.storage import CrawlStorage
+from influx.crawler.application.storage import CrawlStorage, load_crawl_rules
 
 log = get_logger(__name__)
 
@@ -72,7 +73,9 @@ async def run_crawl(
     Setting `shutdown` ends the crawl early: in-flight requests finish, nothing
     new is fetched, what was gathered is flushed, then CrawlInterrupted is
     raised. That is the SIGTERM path; SIGINT is handled by Crawlee itself."""
-    scope = SiteScope.for_root(root_url, rules)
+    # The organization's own exclusion rules always apply; `rules` (CLI) adds to them.
+    stored = await load_crawl_rules(organization_id)
+    scope = SiteScope.for_root(root_url, stored + rules if rules is not None else stored)
     # Each crawl gets a private in-memory queue so concurrent crawls never share
     # URL de-duplication state. The throttler wraps it to honour robots.txt
     # crawl-delay and back off on 429s; its per-host sub-queues are opened
@@ -125,7 +128,7 @@ async def run_crawl(
                 log.warning("skipping %s: content-type %r is not HTML", url, content_type)
                 return
 
-            await storage.add_page(url, extract_text(context.selector))
+            await storage.add_page(url, extract_text(context.selector), extract_title(context.selector))
 
             pages: list[str] = []
             for raw in absolute_links(context.selector, context.request.loaded_url or url):
@@ -243,7 +246,8 @@ async def _download_document(
                 if size > MAX_DOCUMENT_BYTES:
                     raise DocumentTooLarge(size)
                 chunks.append(chunk)
-        await storage.add_document(url, b"".join(chunks))
+        content_type = response.headers.get("content-type") or None
+        await storage.add_document(url, b"".join(chunks), content_type.split(";")[0].strip() if content_type else None)
     except DocumentTooLarge as too_large:
         log.warning("document %s skipped: exceeds %d bytes (%s+)", url, MAX_DOCUMENT_BYTES, too_large)
     except asyncio.CancelledError:

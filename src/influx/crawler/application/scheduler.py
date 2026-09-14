@@ -13,12 +13,11 @@ queued are left PENDING, and `stop()` returns once that is done.
 import asyncio
 import signal
 from contextlib import suppress
-from datetime import datetime, timezone
-
 from influx.core.config import CRAWL_WORKERS
 from influx.core.db import async_session
 from influx.core.logging import get_logger
-from influx.crawler.application.crawler import CrawlInterrupted, run_crawl
+from influx.core.time import utcnow
+from influx.crawler.application.crawler import CrawlInterrupted, CrawlResult, run_crawl
 from influx.crawler.application.service import UrlRules
 from influx.crawler.domain.models import Crawl, CrawlStatus
 
@@ -70,15 +69,29 @@ class CrawlScheduler:
         self._abandon_queue()
 
     async def submit(
-        self, organization_id: int, root_url: str, *, automated: bool = True, rules: UrlRules | None = None
+        self,
+        organization_id: int,
+        root_url: str,
+        *,
+        automated: bool = False,
+        rules: UrlRules | None = None,
+        link_id: int | None = None,
+        requested_by_user_id: int | None = None,
     ) -> int:
         """Queue a crawl and return its Crawl id. `rules` excludes URLs from this crawl only."""
         async with async_session() as session:
-            crawl = Crawl(organization_id=organization_id, root_url=root_url, automated=automated)
+            crawl = Crawl(
+                organization_id=organization_id,
+                root_url=root_url,
+                automated=automated,
+                link_id=link_id,
+                requested_by_user_id=requested_by_user_id,
+            )
             session.add(crawl)
             await session.commit()
             crawl_id = crawl.id
-        assert crawl_id is not None
+        if crawl_id is None:
+            raise RuntimeError("crawl row committed without an id")
         if rules is not None:
             self._rules[crawl_id] = rules
         await self._queue.put(crawl_id)
@@ -112,28 +125,39 @@ class CrawlScheduler:
                 log.warning("crawl %d vanished before it could start", crawl_id)
                 return
             crawl.status = CrawlStatus.ONGOING
-            crawl.started_at = datetime.now(timezone.utc)
+            crawl.started_at = utcnow()
             await session.commit()
 
         interrupted = False
+        result: CrawlResult | None = None
+        error: str | None = None
         try:
-            await run_crawl(
+            result = await run_crawl(
                 crawl.organization_id, crawl.root_url, self._rules.pop(crawl_id, None), shutdown=self._shutdown
             )
             status = CrawlStatus.SUCCEEDED
-        except CrawlInterrupted:
+        except CrawlInterrupted as exc:
             log.warning("crawl %d interrupted: %s", crawl_id, crawl.root_url)
             status = CrawlStatus.FAILED
+            error = f"{type(exc).__name__}: {exc}"
             interrupted = True
-        except Exception:
+        except Exception as exc:
             log.error("crawl %d failed: %s", crawl_id, crawl.root_url)
             status = CrawlStatus.FAILED
+            error = f"{type(exc).__name__}: {exc}"
 
         async with async_session() as session:
             crawl = await session.get(Crawl, crawl_id)
             if crawl is not None:
                 crawl.status = status
-                crawl.finished_at = datetime.now(timezone.utc)
+                crawl.finished_at = utcnow()
+                crawl.error = error
+                if result is not None:
+                    crawl.requests_finished = result.requests_finished
+                    crawl.requests_failed = result.requests_failed
+                    crawl.pages = result.pages
+                    crawl.documents = result.documents
+                    crawl.links = result.links
                 await session.commit()
 
         if interrupted:
