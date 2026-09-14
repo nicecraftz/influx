@@ -23,6 +23,7 @@ def chunkify_text(
 
     step = max_words - overlap
     chunks = [" ".join(words[start : start + max_words]) for start in range(0, len(words), step)]
+
     # The last window can be a strict suffix of the previous one; drop it.
     if len(chunks) > 1 and len(words) - (len(chunks) - 1) * step <= overlap:
         chunks.pop()

@@ -1,5 +1,6 @@
 from ollama import AsyncClient, ResponseError
 
+from influx.core.logging import get_logger
 from influx.core.config import (
     EMBEDDING_BATCH_SIZE,
     EMBEDDING_DIMENSIONS,
@@ -8,12 +9,10 @@ from influx.core.config import (
     OLLAMA_EMBEDDING_MODEL,
     OLLAMA_HOST,
 )
-from influx.core.logging import get_logger
 
 log = get_logger(__name__)
 
 _client = AsyncClient(host=OLLAMA_HOST)
-
 
 async def embed_chunks(chunks: list[str]) -> list[list[float]]:
     """Return one vector per chunk, in the same order as the input.
