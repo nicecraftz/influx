@@ -42,7 +42,7 @@ cp .env.example .env
 | Variabile         | Default           | Descrizione                                              |
 | ----------------- | ----------------- | -------------------------------------------------------- |
 | `JWT_ALGORITHM`   | `HS256`           | Algoritmo di firma dei token                             |
-| `JWT_SECRET_PATH` | `private_key.pem` | File con il segreto di firma, letto all'avvio dell'API   |
+| `JWT_SECRET_PATH` | `secret.key`      | File con il segreto di firma, letto all'avvio dell'API   |
 | `JWT_TTL_MINUTES` | `30`              | Durata dei token                                         |
 | `APP_PORT`        | `8000`            | Porta host dell'API con `docker compose --profile api`   |
 
@@ -228,7 +228,7 @@ l'API (immagine costruita dal `Dockerfile`, utente non root, `uvicorn
 influx.main:app`) e un'istanza di Ollama:
 
 ```sh
-head -c 64 /dev/urandom | base64 > private_key.pem   # segreto JWT (JWT_SECRET_PATH)
+head -c 64 /dev/urandom | base64 > secret.key   # segreto JWT (JWT_SECRET_PATH)
 docker compose --profile api up -d --build --wait
 docker compose exec ollama ollama pull nomic-embed-text-v2-moe
 ```

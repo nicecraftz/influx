@@ -63,7 +63,7 @@ services:
 
 secrets:
   jwt_secret:
-    file: ${JWT_SECRET_PATH:-./private_key.pem}
+    file: ${JWT_SECRET_PATH:-./secret.key}
 
 volumes:
   postgres_data:
