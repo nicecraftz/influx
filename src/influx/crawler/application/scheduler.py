@@ -4,9 +4,15 @@
 picks ids up, flips the row to ONGOING, runs the crawl, and closes it as
 SUCCEEDED or FAILED. Crawls of different organizations or sites run side by
 side, bounded by CRAWL_WORKERS.
+
+SIGTERM (what `docker stop` sends) is handled while the scheduler is running:
+crawls in progress finish their in-flight requests and flush, crawls still
+queued are left PENDING, and `stop()` returns once that is done.
 """
 
 import asyncio
+import signal
+from contextlib import suppress
 from datetime import datetime, timezone
 
 from influx.core.config import CRAWL_WORKERS
@@ -27,11 +33,16 @@ class CrawlScheduler:
         # until the worker picks the crawl up.
         self._rules: dict[int, UrlRules] = {}
         self._tasks: list[asyncio.Task[None]] = []
+        # Set by SIGTERM; shared with every run_crawl so they wind down together.
+        self._shutdown = asyncio.Event()
 
     async def start(self) -> None:
         if self._tasks:
             return
         self._tasks = [asyncio.create_task(self._worker(i), name=f"crawl-worker-{i}") for i in range(self._workers)]
+        # Loop signal handlers only exist on Unix and in the main thread.
+        with suppress(NotImplementedError, ValueError):
+            asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, self._on_sigterm)
         log.info("crawl scheduler started with %d workers", self._workers)
 
     async def stop(self, *, drain: bool = True) -> None:
@@ -42,7 +53,21 @@ class CrawlScheduler:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks = []
+        with suppress(NotImplementedError, ValueError):
+            asyncio.get_running_loop().remove_signal_handler(signal.SIGTERM)
         log.info("crawl scheduler stopped")
+
+    @property
+    def terminated(self) -> bool:
+        """True once SIGTERM has been received: some crawls were cut short."""
+        return self._shutdown.is_set()
+
+    def _on_sigterm(self) -> None:
+        if self._shutdown.is_set():
+            return
+        log.warning("SIGTERM received: finishing running crawls, leaving queued ones PENDING")
+        self._shutdown.set()
+        self._abandon_queue()
 
     async def submit(
         self, organization_id: int, root_url: str, *, automated: bool = True, rules: UrlRules | None = None
@@ -68,6 +93,11 @@ class CrawlScheduler:
         while True:
             crawl_id = await self._queue.get()
             try:
+                if self._shutdown.is_set():
+                    # Submitted after the queue was abandoned: same fate.
+                    self._rules.pop(crawl_id, None)
+                    log.warning("crawl %d not started: left PENDING after interruption", crawl_id)
+                    continue
                 await self._run(crawl_id)
             except Exception:
                 # _run handles its own failures; this only guards the worker loop itself.
@@ -87,10 +117,12 @@ class CrawlScheduler:
 
         interrupted = False
         try:
-            await run_crawl(crawl.organization_id, crawl.root_url, self._rules.pop(crawl_id, None))
+            await run_crawl(
+                crawl.organization_id, crawl.root_url, self._rules.pop(crawl_id, None), shutdown=self._shutdown
+            )
             status = CrawlStatus.SUCCEEDED
         except CrawlInterrupted:
-            log.warning("crawl %d interrupted by user: %s", crawl_id, crawl.root_url)
+            log.warning("crawl %d interrupted: %s", crawl_id, crawl.root_url)
             status = CrawlStatus.FAILED
             interrupted = True
         except Exception:
@@ -108,9 +140,9 @@ class CrawlScheduler:
             self._abandon_queue()
 
     def _abandon_queue(self) -> None:
-        """Ctrl+C means stop everything: crawls still queued are left PENDING in
-        the database and dropped from the queue so `stop()` can return. Crawls
-        already running on other workers finish on their own."""
+        """Ctrl+C and SIGTERM mean stop everything: crawls still queued are left
+        PENDING in the database and dropped from the queue so `stop()` can
+        return. Crawls already running on other workers finish on their own."""
         while True:
             try:
                 crawl_id = self._queue.get_nowait()

@@ -59,13 +59,19 @@ class DocumentTooLarge(Exception):
 
 
 class CrawlInterrupted(Exception):
-    """The crawl was stopped by SIGINT before the queue ran dry. Whatever was
-    gathered so far is flushed to storage."""
+    """The crawl was stopped (SIGINT, or the `shutdown` event) before the queue
+    ran dry. Whatever was gathered so far is flushed to storage."""
 
 
-async def run_crawl(organization_id: int, root_url: str, rules: UrlRules | None = None) -> CrawlResult:
+async def run_crawl(
+    organization_id: int, root_url: str, rules: UrlRules | None = None, *, shutdown: asyncio.Event | None = None
+) -> CrawlResult:
     """Crawl `root_url` for `organization_id` and persist everything. Raises when
-    the crawl cannot complete (storage failure, bad root URL, ...)."""
+    the crawl cannot complete (storage failure, bad root URL, ...).
+
+    Setting `shutdown` ends the crawl early: in-flight requests finish, nothing
+    new is fetched, what was gathered is flushed, then CrawlInterrupted is
+    raised. That is the SIGTERM path; SIGINT is handled by Crawlee itself."""
     scope = SiteScope.for_root(root_url, rules)
     # Each crawl gets a private in-memory queue so concurrent crawls never share
     # URL de-duplication state. The throttler wraps it to honour robots.txt
@@ -148,20 +154,24 @@ async def run_crawl(organization_id: int, root_url: str, rules: UrlRules | None 
             log.warning("giving up on %s: %s", context.request.url, error)
 
         log.info("crawl started: %s (organization %s, %d exclusion rules)", root_url, organization_id, len(scope.rules))
+        stopper = asyncio.create_task(_stop_on_shutdown(crawler, shutdown, root_url)) if shutdown is not None else None
         try:
             stats = await crawler.run([scope.canonical(root_url)])
             # Crawlee installs its own SIGINT handler for the duration of `run()`:
             # Ctrl+C lets in-flight requests finish and then returns as if the
-            # crawl had completed. Requests still queued are the tell.
+            # crawl had completed; `crawler.stop()` does the same. Requests
+            # still queued are the tell.
             if not await throttler.is_finished():
                 raise CrawlInterrupted(root_url)
             if downloads:
                 log.info("crawl of %s: waiting for %d document downloads", root_url, len(downloads))
-                await _wait_or_interrupt(downloads)
+                await _wait_or_interrupt(downloads, shutdown)
         except CrawlInterrupted:
             log.warning("crawl of %s interrupted; flushing what was gathered", root_url)
             raise
         finally:
+            if stopper is not None:
+                stopper.cancel()
             for task in downloads:
                 task.cancel()
             await queue.drop()
@@ -180,23 +190,36 @@ async def run_crawl(organization_id: int, root_url: str, rules: UrlRules | None 
     return result
 
 
-async def _wait_or_interrupt(tasks: set[asyncio.Task[None]]) -> None:
-    """Wait for `tasks`, or raise CrawlInterrupted on SIGINT. Crawlee removes its
-    handler when `run()` returns, so from here on Ctrl+C would otherwise be a bare
-    KeyboardInterrupt tearing down the loop mid-flush."""
+async def _stop_on_shutdown(crawler: ParselCrawler, shutdown: asyncio.Event, root_url: str) -> None:
+    await shutdown.wait()
+    log.warning("crawl of %s: shutdown requested, finishing in-flight requests", root_url)
+    crawler.stop("shutdown requested")
+
+
+async def _wait_or_interrupt(tasks: set[asyncio.Task[None]], shutdown: asyncio.Event | None) -> None:
+    """Wait for `tasks`, or raise CrawlInterrupted on SIGINT or `shutdown`.
+    Crawlee removes its handler when `run()` returns, so from here on Ctrl+C
+    would otherwise be a bare KeyboardInterrupt tearing down the loop mid-flush."""
     loop = asyncio.get_running_loop()
     interrupted = asyncio.Event()
     loop.add_signal_handler(signal.SIGINT, interrupted.set)
-    stop = asyncio.ensure_future(interrupted.wait())
+    stops: set[asyncio.Future[bool]] = {asyncio.ensure_future(interrupted.wait())}
+    if shutdown is not None:
+        stops.add(asyncio.ensure_future(shutdown.wait()))
+
+    def stop_requested() -> bool:
+        return interrupted.is_set() or (shutdown is not None and shutdown.is_set())
+
     pending: set[asyncio.Future[None]] = set(tasks)
     try:
-        while pending and not interrupted.is_set():
-            _, pending = await asyncio.wait({*pending, stop}, return_when=asyncio.FIRST_COMPLETED)
-            pending.discard(stop)
-        if interrupted.is_set():
+        while pending and not stop_requested():
+            _, pending = await asyncio.wait({*pending, *stops}, return_when=asyncio.FIRST_COMPLETED)
+            pending -= stops
+        if stop_requested():
             raise CrawlInterrupted
     finally:
-        stop.cancel()
+        for stop in stops:
+            stop.cancel()
         loop.remove_signal_handler(signal.SIGINT)
 
 
