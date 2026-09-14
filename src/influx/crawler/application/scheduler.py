@@ -7,12 +7,17 @@ side, bounded by CRAWL_WORKERS.
 
 SIGTERM (what `docker stop` sends) is handled while the scheduler is running:
 crawls in progress finish their in-flight requests and flush, crawls still
-queued are left PENDING, and `stop()` returns once that is done.
+queued are left PENDING, and `stop()` returns once that is done. Under uvicorn
+the server owns the signal, so the API builds the scheduler with
+`handle_sigterm=False` and calls `shutdown()` itself when its lifespan ends.
 """
 
 import asyncio
 import signal
 from contextlib import suppress
+
+from sqlmodel import select
+
 from influx.core.config import CRAWL_WORKERS
 from influx.core.db import async_session
 from influx.core.logging import get_logger
@@ -25,8 +30,9 @@ log = get_logger(__name__)
 
 
 class CrawlScheduler:
-    def __init__(self, workers: int = CRAWL_WORKERS) -> None:
+    def __init__(self, workers: int = CRAWL_WORKERS, *, handle_sigterm: bool = True) -> None:
         self._workers = workers
+        self._handle_sigterm = handle_sigterm
         self._queue: asyncio.Queue[int] = asyncio.Queue()
         # Exclusion rules are not persisted with the Crawl row: they live here
         # until the worker picks the crawl up.
@@ -40,8 +46,9 @@ class CrawlScheduler:
             return
         self._tasks = [asyncio.create_task(self._worker(i), name=f"crawl-worker-{i}") for i in range(self._workers)]
         # Loop signal handlers only exist on Unix and in the main thread.
-        with suppress(NotImplementedError, ValueError):
-            asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, self._on_sigterm)
+        if self._handle_sigterm:
+            with suppress(NotImplementedError, ValueError):
+                asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, self._on_sigterm)
         log.info("crawl scheduler started with %d workers", self._workers)
 
     async def stop(self, *, drain: bool = True) -> None:
@@ -52,8 +59,9 @@ class CrawlScheduler:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks = []
-        with suppress(NotImplementedError, ValueError):
-            asyncio.get_running_loop().remove_signal_handler(signal.SIGTERM)
+        if self._handle_sigterm:
+            with suppress(NotImplementedError, ValueError):
+                asyncio.get_running_loop().remove_signal_handler(signal.SIGTERM)
         log.info("crawl scheduler stopped")
 
     @property
@@ -62,9 +70,15 @@ class CrawlScheduler:
         return self._shutdown.is_set()
 
     def _on_sigterm(self) -> None:
+        log.warning("SIGTERM received")
+        self.shutdown()
+
+    def shutdown(self) -> None:
+        """Wind down: running crawls finish their in-flight requests and flush,
+        queued ones are left PENDING. `stop()` then returns once they are done."""
         if self._shutdown.is_set():
             return
-        log.warning("SIGTERM received: finishing running crawls, leaving queued ones PENDING")
+        log.warning("shutting down: finishing running crawls, leaving queued ones PENDING")
         self._shutdown.set()
         self._abandon_queue()
 
@@ -92,11 +106,40 @@ class CrawlScheduler:
             crawl_id = crawl.id
         if crawl_id is None:
             raise RuntimeError("crawl row committed without an id")
+        await self.enqueue(crawl_id, rules)
+        log.info("crawl %d queued: %s (organization %s)", crawl_id, root_url, organization_id)
+        return crawl_id
+
+    async def enqueue(self, crawl_id: int, rules: UrlRules | None = None) -> None:
+        """Queue a PENDING Crawl row somebody else has already committed."""
         if rules is not None:
             self._rules[crawl_id] = rules
         await self._queue.put(crawl_id)
-        log.info("crawl %d queued: %s (organization %s)", crawl_id, root_url, organization_id)
-        return crawl_id
+
+    async def recover(self) -> None:
+        """Pick up what a previous process left behind: crawls still PENDING
+        are queued again (rules given on the CLI are gone, the organization's
+        own still apply), crawls ONGOING when it died are closed as FAILED.
+
+        Meant for the one long-lived scheduler (the API's); a second process
+        calling it would queue the same crawls twice and fail crawls the first
+        one is still running.
+        """
+        async with async_session() as session:
+            stale = (await session.exec(select(Crawl).where(Crawl.status == CrawlStatus.ONGOING))).all()
+            for crawl in stale:
+                crawl.status = CrawlStatus.FAILED
+                crawl.finished_at = utcnow()
+                crawl.error = "CrawlInterrupted: process restarted"
+            pending = (
+                await session.exec(select(Crawl.id).where(Crawl.status == CrawlStatus.PENDING).order_by(Crawl.id))
+            ).all()
+            await session.commit()
+        for crawl_id in pending:
+            if crawl_id is not None:
+                await self.enqueue(crawl_id)
+        if stale or pending:
+            log.warning("recovered %d PENDING crawls, %d ONGOING marked FAILED", len(pending), len(stale))
 
     @property
     def pending(self) -> int:

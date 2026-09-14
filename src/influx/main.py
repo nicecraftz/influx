@@ -1,4 +1,5 @@
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -10,6 +11,8 @@ from influx.core.health import health
 from influx.core.logging import setup_logging
 
 from influx.auth.routes import auth
+from influx.crawler.application.policy import periodic_crawls
+from influx.crawler.application.scheduler import CrawlScheduler
 from influx.crawler.routes import crawler
 from influx.organization.routes import organizations
 from influx.user.routes import users
@@ -20,7 +23,16 @@ async def lifespan(app: FastAPI):
     setup_logging()
     private_key = Path(JWT_SECRET_PATH).read_bytes()
     await init_db()
-    yield {"private_key": private_key}
+    scheduler = CrawlScheduler(handle_sigterm=False)
+    await scheduler.start()
+    await scheduler.recover()
+    sweeper = asyncio.create_task(periodic_crawls(scheduler), name="crawl-sweeper")
+    yield {"private_key": private_key, "scheduler": scheduler}
+    sweeper.cancel()
+    with suppress(asyncio.CancelledError):
+        await sweeper
+    scheduler.shutdown()
+    await scheduler.stop()
     await close_db()
 
 
