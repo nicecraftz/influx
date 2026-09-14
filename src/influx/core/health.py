@@ -38,8 +38,10 @@ async def liveness() -> dict[str, str]:
 @health.get("/ready")
 async def readiness() -> JSONResponse:
     checks = {"database": await _check_database(), "ollama": await _check_ollama()}
+
     if all(status == "ok" for status in checks.values()):
         return JSONResponse({"status": "ok", "checks": checks})
+
     raise NotReady(checks=checks)
 
 
