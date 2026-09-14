@@ -7,6 +7,7 @@ if TYPE_CHECKING:
     from influx.organization.domain.models import Organization
 
 EXAMPLE_USER_EMAIL = "mario.rossi@example.com"
+EXAMPLE_USER_PASSWORD = "placeholder"
 EXAMPLE_ORGANIZATION_NAME = "Esempio"
 
 def main() -> None:
@@ -71,6 +72,8 @@ async def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -
         for url in args.urls:
             await scheduler.submit(args.organization_id, url, automated=False, rules=rules)
         await scheduler.stop()
+        if scheduler.terminated:
+            sys.exit(143)  # 128 + SIGTERM, like the 130 for Ctrl+C
     elif args.command == "embed":
         from influx.ingestion.application.page_service import embed_pages
 
@@ -94,8 +97,9 @@ async def _seed_example(email: str, organization_name: str) -> "Organization":
     """Create the example user and organization unless they already exist."""
     from sqlmodel import select
 
+    from influx.auth.application.password import encrypt_password
     from influx.core.db import async_session
-    from influx.organization.domain.models import Organization
+    from influx.organization.domain.models import Organization, Participation, Role
     from influx.user.domain.models import User
 
     async with async_session() as session:
@@ -107,11 +111,20 @@ async def _seed_example(email: str, organization_name: str) -> "Organization":
 
         user = (await session.exec(select(User).where(User.email == email))).first()
         if user is None:
-            user = User(name="Mario", last_name="Rossi", email=email, hashed_password="placeholder")
+            user = User(
+                name="Mario",
+                last_name="Rossi",
+                email=email,
+                hashed_password=encrypt_password(EXAMPLE_USER_PASSWORD),
+            )
             session.add(user)
             await session.flush()
 
         organization = Organization(name=organization_name, administrator_id=user.id)
         session.add(organization)
+        await session.flush()
+        # Membership is what the API checks (require_membership, RLS policies);
+        # administrator_id alone would leave the admin locked out of its own org.
+        session.add(Participation(organization_id=organization.id, user_id=user.id, role=Role.ADMIN))
         await session.commit()
         return organization
