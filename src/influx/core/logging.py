@@ -1,9 +1,11 @@
 """Project-wide logging with exactly three levels: info, warning, error.
 
-The console gets one line per event; when an error carries an exception the
-line ends with a pointer to the log file, and only the rotating file receives
-the full stacktrace. Call `setup_logging()` once at process start and use
-`get_logger(__name__)` everywhere else.
+In development the console gets one line per event; when an error carries an
+exception the line ends with a pointer to the log file, and only the rotating
+file receives the full stacktrace. In production (`INFLUX_ENV=production`)
+there is no file: everything, stacktraces included, goes to stderr so the
+container runtime collects it. Call `setup_logging()` once at process start
+and use `get_logger(__name__)` everywhere else.
 """
 
 import logging
@@ -11,7 +13,7 @@ import logging.handlers
 import sys
 from typing import Any
 
-from influx.core.config import LOG_BACKUP_COUNT, LOG_FILE, LOG_MAX_BYTES
+from influx.core.config import INFLUX_ENV, LOG_BACKUP_COUNT, LOG_FILE, LOG_MAX_BYTES
 
 _FILE_FORMAT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
 _DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -63,27 +65,33 @@ def get_logger(name: str) -> Logger:
 
 
 def setup_logging() -> None:
-    """Install the console + rotating-file handlers on the root logger. Idempotent."""
+    """Install the handlers on the root logger. Idempotent."""
     global _configured
     if _configured:
         return
     _configured = True
 
-    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.handlers.clear()
+    for handler in _handlers():
+        root.addHandler(handler)
 
+    for name in _NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
+def _handlers() -> list[logging.Handler]:
+    if INFLUX_ENV == "production":
+        stderr = logging.StreamHandler(sys.stderr)
+        stderr.setFormatter(logging.Formatter(_FILE_FORMAT, _DATE_FORMAT))
+        return [stderr]
+
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     console = logging.StreamHandler(sys.stderr)
     console.setFormatter(_ConsoleFormatter())
-
     file = logging.handlers.RotatingFileHandler(
         LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8"
     )
     file.setFormatter(logging.Formatter(_FILE_FORMAT, _DATE_FORMAT))
-
-    root = logging.getLogger()
-    root.setLevel(logging.INFO)
-    root.handlers.clear()
-    root.addHandler(console)
-    root.addHandler(file)
-
-    for name in _NOISY_LOGGERS:
-        logging.getLogger(name).setLevel(logging.WARNING)
+    return [console, file]
