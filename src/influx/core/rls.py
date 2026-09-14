@@ -81,6 +81,8 @@ POLICIES: dict[str, tuple[str, str | None]] = {
     "page": (_MEMBER, _ADMIN),
     "document": (_MEMBER, _ADMIN),
     "contentchunk": (_MEMBER, _ADMIN),
+    # Any member may ask and the API logs the question as that member.
+    "question": (_MEMBER, _MEMBER),
     # A user sees itself and whoever shares an organization with it; it can
     # only change itself. Registration (INSERT) is not an API concern yet.
     "user": (

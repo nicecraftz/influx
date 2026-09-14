@@ -15,6 +15,7 @@ from influx.core.rls import apply_row_level_security, mark_api_session
 import influx.crawler.domain.models  # noqa: F401
 import influx.ingestion.domain.models  # noqa: F401
 import influx.organization.domain.models  # noqa: F401
+import influx.retrieval.domain.models  # noqa: F401
 import influx.user.domain.models  # noqa: F401
 
 engine = create_async_engine(DATABASE_URL)
