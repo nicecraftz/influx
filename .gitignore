@@ -20,6 +20,7 @@ logs/
 
 # Local environment
 .env
+secret.key
 
 # VSCode
 .vscode/
