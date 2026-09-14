@@ -42,6 +42,17 @@ class Document(SQLModel, table=True):
     blob: bytes = Field(sa_column=Column(LargeBinary, nullable=False))
     last_seen_at: datetime = timestamp_field()
 
+    # Markdown extracted from `blob` by the `convert` command
+    # (ingestion/application/document_service.py). `text_hash` is the blob's
+    # hash at extraction time: when it no longer matches `hash` the document
+    # was re-crawled and the text is stale. A NULL `text` with a `text_hash`
+    # is a conversion that failed (`conversion_error` says why) or a blob with
+    # no text layer, e.g. a scanned PDF.
+    text: str | None = Field(default=None, sa_column=Column(Text))
+    text_hash: bytes | None = Field(default=None, sa_column=Column(LargeBinary(32)))
+    converted_at: datetime | None = timestamp_field(nullable=True, default_now=False)
+    conversion_error: str | None = Field(default=None, sa_column=Column(Text))
+
     organization_id: int = Field(foreign_key="organization.id", nullable=False, ondelete="CASCADE")
     organization: "Organization" = Relationship(back_populates="documents")
 
@@ -66,7 +77,10 @@ class Page(SQLModel, table=True):
 
 
 class Link(SQLModel, table=True):
-    """A host discovered under the organization's domain (e.g. a subdomain).
+    """A host under the organization's domain: its own site, created enabled
+    together with the organization, and every subdomain a crawl discovers,
+    disabled until an admin switches it on. Enabled links are what a crawl of
+    the organization covers (application/policy.py).
 
     `url` is the origin (scheme://host) so an enabled link can be handed to the
     crawler as a root_url as-is.
@@ -86,7 +100,7 @@ class Link(SQLModel, table=True):
 class Crawl(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     root_url: str = Field(sa_column=Column(String(URL_LENGTH), nullable=False))
-    # True when created by the periodic scheduler, False for CLI/API requests.
+    # True when created by the periodic sweep, False for CLI/API requests.
     automated: bool = Field(default=False, nullable=False)
     status: CrawlStatus = Field(
         default=CrawlStatus.PENDING,

@@ -1,4 +1,5 @@
-from os import getenv
+from datetime import timedelta
+from os import cpu_count, getenv
 from pathlib import Path
 from urllib.parse import quote_plus
 
@@ -40,21 +41,47 @@ EMBEDDING_DIMENSIONS = int(getenv("EMBEDDING_DIMENSIONS", "768"))
 EMBEDDING_DOCUMENT_PREFIX = "search_document: "
 EMBEDDING_QUERY_PREFIX = "search_query: "
 
-OLLAMA_ENRICHMENT_MODEL = getenv("OLLAMA_ENRICHMENT_MODEL", "qwen3:8b")
 MAX_WORDS_PER_CHUNK = 250
 EMBEDDING_BATCH_SIZE = 32
 CHUNK_OVERLAP_WORDS = int(getenv("CHUNK_OVERLAP_WORDS", "50"))
+
+# Question answering (retrieval/). The model is asked to answer from the
+# RETRIEVAL_TOP_K nearest chunks only; at MAX_WORDS_PER_CHUNK words each they
+# are about 2.5k tokens in Italian, which the context window must hold
+# together with the prompt and the answer (Ollama's default of 4k would
+# silently drop the head of the prompt).
+OLLAMA_ANSWER_MODEL = getenv("OLLAMA_ANSWER_MODEL", "qwen3:8b")
+RETRIEVAL_TOP_K = 6
+ANSWER_CONTEXT_TOKENS = 8192
+ANSWER_TEMPERATURE = 0.1
+QUESTION_MAX_LENGTH = 1000
 
 
 CRAWL_WORKERS = 2
 CRAWL_MAX_CONCURRENCY = 10
 CRAWL_RESPECT_ROBOTS_TXT = True
+# An organization is crawled at most once per interval, whether an admin asks
+# or the periodic sweep does (crawler/application/policy.py).
+CRAWL_INTERVAL = timedelta(hours=24)
+# How often the API checks for organizations due for their automatic crawl.
+CRAWL_SWEEP_INTERVAL = timedelta(minutes=10)
 DOCUMENT_MAX_CONCURRENCY = 4
 MAX_DOCUMENT_BYTES = 70 * 1024 * 1024
 
 STORAGE_BATCH_ROWS = 200
 STORAGE_BATCH_BYTES = 32 * 1024 * 1024
 STORAGE_FLUSH_INTERVAL = 10.0
+
+# Document -> text conversion (ingestion/application/document_service.py).
+# pdfminer is pure Python and CPU-bound, so each worker is a process; one
+# core is left to the event loop and Postgres.
+CONVERT_WORKERS = max(1, (cpu_count() or 2) - 1)
+# Seconds one document may take before it is marked failed: a 1000-page PDF
+# converts in about 35 s on a laptop, so this only catches pathological files.
+CONVERT_TIMEOUT = 600
+# A worker process is replaced after this many documents: pdfminer keeps
+# per-document caches that never shrink.
+CONVERT_TASKS_PER_WORKER = 50
 
 JWT_ALGORITHM = getenv("JWT_ALGORITHM", "HS256")
 JWT_SECRET_PATH = getenv("JWT_SECRET_PATH", "secret.key")
