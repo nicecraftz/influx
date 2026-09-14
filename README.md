@@ -22,9 +22,10 @@ Copia il file di esempio e, se necessario, modifica i valori:
 cp .env.example .env
 ```
 
-| Variabile     | Default     | Descrizione                    |
-| ------------- | ----------- | ------------------------------ |
-| `DB_USER`     | `influx`    | Utente del database            |
+| Variabile     | Default       | Descrizione                                                   |
+| ------------- | ------------- | ------------------------------------------------------------- |
+| `INFLUX_ENV`  | `development` | `production` manda i log solo su stderr (niente file), vedi "Log" |
+| `DB_USER`     | `influx`      | Utente del database                                           |
 | `DB_PASSWORD` | `influx`    | Password del database          |
 | `DB_HOST`     | `localhost` | Host a cui si connette l'app   |
 | `DB_PORT`     | `5432`      | Porta esposta sulla macchina   |
@@ -35,6 +36,15 @@ cp .env.example .env
 | `OLLAMA_HOST`            | `http://localhost:11434` | Endpoint di Ollama                            |
 | `OLLAMA_EMBEDDING_MODEL` | `nomic-embed-text-v2-moe` | Modello per gli embedding                    |
 | `EMBEDDING_DIMENSIONS`   | `768`                    | Dimensione dei vettori richiesta al modello   |
+| `CHUNK_OVERLAP_WORDS`    | `50`                     | Parole condivise da due chunk consecutivi     |
+| `OLLAMA_ENRICHMENT_MODEL`| `qwen3:8b`               | Modello generativo (letto, non ancora usato)  |
+
+| Variabile         | Default           | Descrizione                                              |
+| ----------------- | ----------------- | -------------------------------------------------------- |
+| `JWT_ALGORITHM`   | `HS256`           | Algoritmo di firma dei token                             |
+| `JWT_SECRET_PATH` | `private_key.pem` | File con il segreto di firma, letto all'avvio dell'API   |
+| `JWT_TTL_MINUTES` | `30`              | Durata dei token                                         |
+| `APP_PORT`        | `8000`            | Porta host dell'API con `docker compose --profile api`   |
 
 `EMBEDDING_DIMENSIONS` è sia la dimensione chiesta a Ollama sia la larghezza
 della colonna `vector` dei chunk: cambiandola (o cambiando modello) va
@@ -78,9 +88,21 @@ uv run influx init-db
 ```
 
 `init-db` abilita l'estensione `vector`, crea tutte le tabelle e, se non
-esistono già, un utente di esempio (`mario.rossi@example.com`) con
-un'organizzazione `Esempio` di cui è amministratore. È idempotente: può essere rilanciato senza problemi. Al termine
-stampa l'`id` dell'organizzazione, che serve al passo successivo.
+esistono già, un utente di esempio (`mario.rossi@example.com`, password
+`placeholder`) con un'organizzazione `Esempio` di cui è amministratore
+(`Participation` con ruolo `ADMIN`). È idempotente: può essere rilanciato senza
+problemi. Al termine stampa l'`id` dell'organizzazione, che serve al passo
+successivo.
+
+Lo stesso comando installa la row-level security (`src/influx/core/rls.py`):
+crea il ruolo `influx_api` (senza login), abilita RLS su ogni tabella e
+definisce le policy per cui una richiesta API vede e modifica solo le righe
+delle organizzazioni di cui l'utente autenticato fa parte (scrittura solo con
+ruolo `ADMIN`). Ogni transazione aperta da una route passa a `influx_api`
+tramite `SET LOCAL`, quindi le policy valgono per l'API mentre CLI e worker,
+collegati come `DB_USER` (proprietario delle tabelle), continuano a vedere
+tutto. Aggiungere una tabella richiede una voce in `POLICIES`, altrimenti
+`init-db` si rifiuta di partire.
 
 ### 3. Utente e organizzazione
 
@@ -95,6 +117,9 @@ VALUES ('Anna', 'Bianchi', 'anna.bianchi@example.com', 'placeholder');
 
 INSERT INTO organization (name, administrator_id)
 VALUES ('Altra', currval('user_id_seq'));
+
+INSERT INTO participation (organization_id, user_id, role)
+VALUES (currval('organization_id_seq'), currval('user_id_seq'), 'ADMIN');
 
 SELECT id, name FROM organization;
 SQL
@@ -196,18 +221,59 @@ uv run influx crawl --organization-id <ID> <URL> [URL…] # avvia uno o più cra
 uv run influx embed --organization-id <ID> [--force]     # chunk + embedding delle pagine crawlate
 ```
 
+## API in Docker
+
+`docker-compose.yml` ha un profilo `api` che, oltre a PostgreSQL, avvia
+l'API (immagine costruita dal `Dockerfile`, utente non root, `uvicorn
+influx.main:app`) e un'istanza di Ollama:
+
+```sh
+head -c 64 /dev/urandom | base64 > private_key.pem   # segreto JWT (JWT_SECRET_PATH)
+docker compose --profile api up -d --build --wait
+docker compose exec ollama ollama pull nomic-embed-text-v2-moe
+```
+
+L'API risponde su `http://localhost:8000` (`APP_PORT`). Il servizio `app`
+legge lo stesso `.env` e sovrascrive solo ciò che dipende dalla rete di
+compose (`DB_HOST=postgres`, `OLLAMA_HOST=http://ollama:11434`,
+`INFLUX_ENV=production`, il segreto JWT montato da `/run/secrets`). La stessa
+immagine esegue anche la CLI:
+
+```sh
+docker compose --profile api run --rm app influx crawl --organization-id 1 https://esempio.it
+```
+
+### Health check
+
+- `GET /health` — liveness: 200 appena il processo serve richieste.
+- `GET /health/ready` — readiness: esegue `SELECT 1` sul database e
+  `GET /api/tags` su Ollama; 503 (`application/problem+json`, con l'esito
+  di ogni controllo in `checks`) finché uno dei due non risponde. È quello
+  usato dall'`healthcheck` di compose.
+
+### Arresto
+
+Un `SIGTERM` (quello di `docker stop`) al comando `crawl` ferma i crawl in
+corso in modo pulito: le richieste già in volo terminano, non ne partono di
+nuove, quanto raccolto viene scritto sul database e i crawl ancora in coda
+restano `PENDING`. Il processo esce con codice 143. Con molte richieste in
+volo può servire più dei 10 s di default di Docker: alzare `stop_grace_period`.
+
 ## Log
 
-La console mostra una riga per evento; lo stacktrace completo degli errori
-finisce in `logs/influx.log` (rotazione automatica a 10 MB, 5 file
-conservati).
+In sviluppo la console mostra una riga per evento; lo stacktrace completo
+degli errori finisce in `logs/influx.log` (rotazione automatica a 10 MB, 5
+file conservati). Con `INFLUX_ENV=production` non c'è file: tutto, stacktrace
+compresi, va su stderr, da dove lo raccoglie il runtime dei container.
 
 ## Struttura del progetto
 
 ```
 src/influx/
 ├── __init__.py            # entrypoint CLI
-├── core/                  # config, connessione al DB, logging
+├── main.py                # app FastAPI
+├── auth/                  # login, JWT, dipendenze get_current_user / require_membership
+├── core/                  # config, connessione al DB, RLS, logging, health check
 ├── crawler/               # crawl, scheduler, storage batch, modelli Page/Document/Link
 ├── ingestion/             # chunking, embedding via Ollama, modello ContentChunk
 ├── organization/          # Organization, Participation
